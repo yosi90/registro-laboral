@@ -5,21 +5,37 @@ import { jsPDF } from 'jspdf';
 import { Camera, Clock, AlertCircle, FileText, Calendar } from 'lucide-react';
 
 export default function RegistroLaboral() {
+    // Tipos reutilizables para los registros
+    type Registro = {
+        hora: string;
+        foto: string;
+    };
+
+    type RegistroIncidencia = Registro & {
+        nota: string;
+    };
+
+    interface RegistroData {
+        entrada?: Registro;
+        salida?: Registro;
+        incidencias?: RegistroIncidencia[];
+    }
 
     // 🔧 Fallback de window.storage si no existe
     if (!window.storage) {
         window.storage = {
-            async get(key) {
+            async get(key: string) {
                 const value = localStorage.getItem(key);
-                return value ? { value } : null;
+                // return undefined when not found to match declared types
+                return value ? { value } : undefined;
             },
-            async set(key, value) {
+            async set(key: string, value: string) {
                 localStorage.setItem(key, value);
             },
             async list() {
                 return { keys: Object.keys(localStorage) };
             }
-        };
+        } as unknown as Window['storage'];
     }
 
     const [tipoRegistro, setTipoRegistro] = useState('');
@@ -118,25 +134,10 @@ export default function RegistroLaboral() {
 
     const guardarRegistro = async (tipo: 'entrada' | 'salida' | 'incidencia', hora: string, foto: string, nota = '') => {
         const hoy = new Date().toISOString().slice(0, 10);
-        type Registro = {
-            hora: string;
-            foto: string;
-        };
-
-        type RegistroIncidencia = Registro & {
-            nota: string;
-        };
-
-        interface RegistroData {
-            entrada?: Registro;
-            salida?: Registro;
-            incidencias?: RegistroIncidencia[];
-        }
-
         let data: RegistroData = {};
 
         try {
-            const result: { value: string } = await window.storage.get(hoy);
+            const result = await window.storage.get(hoy);
             if (result) {
                 data = JSON.parse(result.value) as RegistroData;
             }
@@ -231,8 +232,9 @@ export default function RegistroLaboral() {
 
             for (let i = 0; i < fechas.length; i++) {
                 const fecha = fechas[i];
-                const result = await window.storage.get(fecha);
-                const d = JSON.parse(result.value);
+                const res = await window.storage.get(fecha);
+                if (!res) continue;
+                const d = JSON.parse(res.value) as RegistroData;
 
                 if (i > 0) doc.addPage();
                 doc.setFontSize(14);
