@@ -2,7 +2,7 @@
 import { useState, useRef, useEffect } from 'react';
 import exifr from 'exifr';
 import { jsPDF } from 'jspdf';
-import { Camera, Clock, AlertCircle, FileText, Calendar } from 'lucide-react';
+import { Camera, Clock, AlertCircle, FileText, Calendar, LogIn, LogOut } from 'lucide-react';
 import { getDia, setDia, addDiaAlIndice, listDias } from './native/storage';
 import type { RegistroData, Jornada } from './native/storage';
 import { buildPdfName, fileExists, openFile, saveDataUrlSafe, readAsDataUrl, buildImageName, saveDataUrl } from './native/files';
@@ -24,6 +24,7 @@ export default function RegistroLaboral() {
     })();
 
     const [tipoRegistro, setTipoRegistro] = useState('');
+    const [jornadasHoy, setJornadasHoy] = useState<Jornada[]>([]);
     const [notaIncidencia, setNotaIncidencia] = useState('');
     const [horaIncidencia, setHoraIncidencia] = useState('');
     const [dentroTrabajo, setDentroTrabajo] = useState(false);
@@ -72,6 +73,7 @@ export default function RegistroLaboral() {
         try {
             const data = await getDia(hoy);
             const jornadas = data?.jornadas ?? [];
+            setJornadasHoy(jornadas);
             const ultima = jornadas[jornadas.length - 1];
             const dentro = Boolean(ultima && ultima.entrada && !ultima.salida);
 
@@ -200,7 +202,7 @@ export default function RegistroLaboral() {
             const nombre = buildImageName(tipoRegistro as 'entrada' | 'salida' | 'incidencia', fechaFoto);
             const ruta = await saveDataUrl(nombre, dataUrl);
             // 4) guardar metadata con la **ruta** (no base64)
-            const hora = fechaFoto.toTimeString().slice(0, 5);
+            const hora = fechaFoto.toTimeString().slice(0, 8); // HH:MM:SS
 
             if (tipoRegistro === 'incidencia') {
                 setHoraIncidencia(hora);
@@ -479,6 +481,45 @@ export default function RegistroLaboral() {
                         </div>
                     </div>
                 )}
+
+                {/* Jornadas de hoy */}
+                <div className="bg-gray-800 rounded-lg p-4 mb-6 border border-gray-700">
+                    <h3 className="text-lg font-semibold mb-3">Jornadas de hoy</h3>
+
+                    {jornadasHoy.length === 0 && (
+                        <p className="text-gray-400 text-sm">Aún no hay registros hoy.</p>
+                    )}
+
+                    <ul className="space-y-2">
+                        {jornadasHoy.map((j, idx) => (
+                            <li key={idx} className="text-sm">
+                                {/* Entrada */}
+                                <div className="flex items-center gap-2">
+                                    <LogIn className="w-4 h-4 text-green-400" />
+                                    <span className="text-gray-300">Entrada</span>
+                                    <span className="ml-auto font-mono">{j.entrada?.hora ?? '--:--:--'}</span>
+                                </div>
+
+                                {/* Salida (si existe) */}
+                                {j.salida && (
+                                    <div className="flex items-center gap-2 mt-1">
+                                        <LogOut className="w-4 h-4 text-red-400" />
+                                        <span className="text-gray-300">Salida</span>
+                                        <span className="ml-auto font-mono">{j.salida.hora}</span>
+                                    </div>
+                                )}
+                                {/* Incidencias (si hay) */}
+                                {j.incidencias?.length ? (
+                                    <div className="mt-1 ml-6 text-xs text-gray-400">
+                                        {j.incidencias.map((inc, k) => (
+                                            <div key={k}>• Incidencia {k + 1}: {inc.hora}</div>
+                                        ))}
+                                    </div>
+                                ) : null}
+                            </li>
+                        ))}
+                    </ul>
+                </div>
 
                 {/* Input oculto de archivo */}
                 <input
