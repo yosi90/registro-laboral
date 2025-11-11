@@ -3,40 +3,25 @@ import { useState, useRef, useEffect } from 'react';
 import exifr from 'exifr';
 import { jsPDF } from 'jspdf';
 import { Camera, Clock, AlertCircle, FileText, Calendar } from 'lucide-react';
+import { getDia, setDia, addDiaAlIndice, listDias } from './native/storage';
+import type { RegistroData, Jornada } from './native/storage';
+import { buildPdfName, fileExists, openFile, saveDataUrlSafe, readAsDataUrl, buildImageName, saveDataUrl } from './native/files';
+import { compressImageDataUrl } from './native/imageTools';
+import { App as CapApp } from '@capacitor/app';
+import type { PluginListenerHandle } from '@capacitor/core';
 
 export default function RegistroLaboral() {
-    // Tipos reutilizables para los registros
-    type Registro = {
-        hora: string;
-        foto: string;
-    };
 
-    type RegistroIncidencia = Registro & {
-        nota: string;
-    };
-
-    interface RegistroData {
-        entrada?: Registro;
-        salida?: Registro;
-        incidencias?: RegistroIncidencia[];
+    function yyyy_mm_dd_local(d = new Date()) {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
     }
-
-    // 🔧 Fallback de window.storage si no existe
-    if (!window.storage) {
-        window.storage = {
-            async get(key: string) {
-                const value = localStorage.getItem(key);
-                // return undefined when not found to match declared types
-                return value ? { value } : undefined;
-            },
-            async set(key: string, value: string) {
-                localStorage.setItem(key, value);
-            },
-            async list() {
-                return { keys: Object.keys(localStorage) };
-            }
-        } as unknown as Window['storage'];
-    }
+    const mesActualLocal = (() => {
+        const d = new Date();
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    })();
 
     const [tipoRegistro, setTipoRegistro] = useState('');
     const [notaIncidencia, setNotaIncidencia] = useState('');
@@ -48,27 +33,57 @@ export default function RegistroLaboral() {
     const [cargando, setCargando] = useState(false);
     const inputRef = useRef<HTMLInputElement | null>(null);
 
+    // Distingue si viene de la época "antigua" (dataURL) o de fichero nuevo (ruta)
+    const toDataUrl = async (src: string) => {
+        return src.startsWith('data:') ? src : await readAsDataUrl(src);
+    };
+
     useEffect(() => {
-        // Detectar si es dispositivo táctil con cámara
+        // Detecta y verifica al arrancar (lo tuyo de antes)
         const esTactil = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
         const tieneCamara = 'mediaDevices' in navigator && 'getUserMedia' in navigator.mediaDevices;
-
-        if (!esTactil || !tieneCamara) {
-            setDispositivoValido(false);
-        }
-
-        // Verificar estado del día actual
+        if (!esTactil || !tieneCamara) setDispositivoValido(false);
         verificarEstadoHoy();
+
+        // --- LISTENERS ---
+        let appStateHandle: PluginListenerHandle | undefined;
+
+        (async () => {
+            // 👇 Espera el handle real (no la promesa)
+            appStateHandle = await CapApp.addListener('appStateChange', ({ isActive }) => {
+                if (isActive) verificarEstadoHoy();
+            });
+        })();
+
+        const onVis = () => {
+            if (document.visibilityState === 'visible') verificarEstadoHoy();
+        };
+        document.addEventListener('visibilitychange', onVis);
+
+        // Limpieza correcta
+        return () => {
+            appStateHandle?.remove();         // 👈 ahora sí existe remove()
+            document.removeEventListener('visibilitychange', onVis);
+        };
     }, []);
 
     const verificarEstadoHoy = async () => {
-        const hoy = new Date().toISOString().slice(0, 10);
+        const hoy = yyyy_mm_dd_local();
         try {
-            const result = await window.storage.get(hoy);
-            if (result) {
-                const data = JSON.parse(result.value);
-                setDentroTrabajo(data.entrada && !data.salida);
+            const data = await getDia(hoy);
+            const jornadas = data?.jornadas ?? [];
+            const ultima = jornadas[jornadas.length - 1];
+            const dentro = Boolean(ultima && ultima.entrada && !ultima.salida);
+
+            // Fallback: si está en índice pero sin data (race), mantenemos estado
+            if (!data) {
+                const idx = await listDias();
+                if (idx.includes(hoy)) {
+                    setDentroTrabajo(true);
+                    return;
+                }
             }
+            setDentroTrabajo(dentro);
         } catch {
             setDentroTrabajo(false);
         }
@@ -100,31 +115,24 @@ export default function RegistroLaboral() {
             throw new Error('La foto no contiene datos de fecha. Asegúrate de que tu cámara guarde metadatos EXIF.');
         }
 
-        const hoy = new Date();
-        hoy.setHours(0, 0, 0, 0);
-        const fechaFotoSinHora = new Date(fechaFoto);
-        fechaFotoSinHora.setHours(0, 0, 0, 0);
+        const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
+        const fechaFotoSinHora = new Date(fechaFoto); fechaFotoSinHora.setHours(0, 0, 0, 0);
 
-        // Validar que la foto sea del día actual
         if (fechaFotoSinHora.getTime() !== hoy.getTime()) {
-            throw new Error('La foto debe ser del día actual.');
+            throw new Error('La foto debe ser de día hoy.');
         }
 
-        // Si es salida, validar que sea posterior a la entrada
         if (tipoRegistro === 'salida') {
-            const hoyStr = new Date().toISOString().slice(0, 10);
-            const result = await window.storage.get(hoyStr);
-
-            if (result) {
-                const data = JSON.parse(result.value);
-                if (data.entrada) {
-                    const [horaE, minE] = data.entrada.hora.split(':').map(Number);
-                    const fechaEntrada = new Date(fechaFoto);
-                    fechaEntrada.setHours(horaE, minE, 0, 0);
-
-                    if (fechaFoto <= fechaEntrada) {
-                        throw new Error('La foto de salida debe ser posterior a la hora de entrada.');
-                    }
+            const hoyStr = yyyy_mm_dd_local();
+            const data = await getDia(hoyStr);
+            const jornadas = data?.jornadas ?? [];
+            const ultima = jornadas[jornadas.length - 1];
+            if (ultima?.entrada) {
+                const [hE, mE] = ultima.entrada.hora.split(':').map(Number);
+                const fechaEntrada = new Date(fechaFoto);
+                fechaEntrada.setHours(hE, mE, 0, 0);
+                if (fechaFoto <= fechaEntrada) {
+                    throw new Error('La foto de salida debe ser posterior a la última entrada abierta.');
                 }
             }
         }
@@ -132,59 +140,82 @@ export default function RegistroLaboral() {
         return fechaFoto;
     };
 
-    const guardarRegistro = async (tipo: 'entrada' | 'salida' | 'incidencia', hora: string, foto: string, nota = '') => {
-        const hoy = new Date().toISOString().slice(0, 10);
-        let data: RegistroData = {};
+    const guardarRegistro = async (
+        tipo: 'entrada' | 'salida' | 'incidencia',
+        hora: string,
+        foto: string,
+        nota = ''
+    ) => {
+        const hoy = yyyy_mm_dd_local();
+        const data: RegistroData = (await getDia(hoy)) ?? { jornadas: [] };
+        const jornadas = data.jornadas;
 
-        try {
-            const result = await window.storage.get(hoy);
-            if (result) {
-                data = JSON.parse(result.value) as RegistroData;
+        const ultima = jornadas[jornadas.length - 1];
+
+        if (tipo === 'entrada') {
+            // Si la última jornada está abierta, evita duplicar; abre una nueva jornada
+            if (ultima && !ultima.salida) {
+                // opcional: podrías avisar; aquí abrimos una nueva igualmente
             }
-        } catch {
-            data = {};
-        }
-
-        if (tipo === 'incidencia') {
-            data.incidencias = data.incidencias || [];
-            data.incidencias.push({ hora, foto, nota });
-        } else if (tipo === 'entrada') {
-            data.entrada = { hora, foto };
+            jornadas.push({ entrada: { hora, foto }, incidencias: [] });
+            setDentroTrabajo(true); // optimista
         } else if (tipo === 'salida') {
-            data.salida = { hora, foto };
+            // Debe cerrar la última jornada abierta
+            if (!ultima || ultima.salida) {
+                alert('No hay una entrada abierta para cerrar.');
+                return;
+            }
+            ultima.salida = { hora, foto };
+            setDentroTrabajo(false); // optimista
+        } else if (tipo === 'incidencia') {
+            // Añade a la jornada abierta; si no hay, a la última; si no, crea una nueva “huérfana”
+            if (ultima) {
+                (ultima.incidencias = ultima.incidencias || []).push({ hora, foto, nota });
+            } else {
+                jornadas.push({ entrada: { hora, foto: '' }, incidencias: [{ hora, foto, nota }] });
+            }
         }
 
-        await window.storage.set(hoy, JSON.stringify(data));
-        alert(`${tipo.charAt(0).toUpperCase() + tipo.slice(1)} registrada a las ${hora}`);
+        await setDia(hoy, { jornadas });
+        await addDiaAlIndice(hoy);
 
-        await verificarEstadoHoy();
+        alert(`${tipo.charAt(0).toUpperCase() + tipo.slice(1)} registrada a las ${hora}`);
+        setTimeout(verificarEstadoHoy, 150);
     };
 
     const onFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
-
         setCargando(true);
 
         try {
-            // Validar fecha de la foto
+            // Validar fecha de la foto (tu función ya lo hace con EXIF)
             const fechaFoto = await validarFechaFoto(file, tipoRegistro);
 
-            const base64 = String(await archivoABase64(file));
+            // 1) convertir a dataURL (como ya tenías)
+            const dataUrlOriginal = String(await archivoABase64(file));
+            // 2) (opcional) comprimir
+            const dataUrl = await compressImageDataUrl(dataUrlOriginal, 1280, 0.7);
+            // 3) generar nombre y guardar fichero real
+            const nombre = buildImageName(tipoRegistro as 'entrada' | 'salida' | 'incidencia', fechaFoto);
+            const ruta = await saveDataUrl(nombre, dataUrl);
+            // 4) guardar metadata con la **ruta** (no base64)
             const hora = fechaFoto.toTimeString().slice(0, 5);
 
             if (tipoRegistro === 'incidencia') {
                 setHoraIncidencia(hora);
-                // Para incidencias, esperamos a que el usuario complete el formulario
+                await guardarRegistro('incidencia', hora, ruta, notaIncidencia);
+                setNotaIncidencia('');
+                setHoraIncidencia('');
+                setTipoRegistro('');
                 setCargando(false);
                 return;
             }
 
-            await guardarRegistro(tipoRegistro as 'entrada' | 'salida', hora, base64);
+            await guardarRegistro(tipoRegistro as 'entrada' | 'salida', hora, ruta);
             setTipoRegistro('');
-        } catch (error: Error | unknown) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            alert(`Error: ${errorMessage}`);
+        } catch (error: any) {
+            alert(`Error: ${error?.message ?? String(error)}`);
             setTipoRegistro('');
         }
 
@@ -211,30 +242,34 @@ export default function RegistroLaboral() {
 
     const generarPDF = async (mes?: string) => {
         setCargando(true);
-        const doc = new jsPDF();
-
         try {
-            const result = await window.storage.list();
-            const fechas = result.keys
-                .filter((key: string) => {
-                    if (mes) {
-                        return key.startsWith(mes);
-                    }
-                    return true;
-                })
+            const periodo = mes ?? 'completo';
+            const nombreArchivo = buildPdfName(periodo);
+
+            // Si ya existe, lo abrimos y salimos
+            if (await fileExists(nombreArchivo)) {
+                await openFile(nombreArchivo);
+                return;
+            }
+
+            const doc = new jsPDF();
+
+            // 1) Fechas a incluir
+            const todas = await listDias();
+            const fechas = todas
+                .filter(k => (mes ? k.startsWith(mes) : true))
                 .sort();
 
             if (fechas.length === 0) {
                 alert('No hay registros para el período seleccionado.');
-                setCargando(false);
                 return;
             }
 
+            // 2) Para cada fecha, dibujamos su página
             for (let i = 0; i < fechas.length; i++) {
                 const fecha = fechas[i];
-                const res = await window.storage.get(fecha);
-                if (!res) continue;
-                const d = JSON.parse(res.value) as RegistroData;
+                const d = await getDia(fecha);                 // <- AQUÍ está "d"
+                const jornadas = (d?.jornadas ?? []) as Jornada[];
 
                 if (i > 0) doc.addPage();
                 doc.setFontSize(14);
@@ -242,86 +277,81 @@ export default function RegistroLaboral() {
                 doc.text(`Fecha: ${fecha}`, 10, 10);
                 doc.setFont('helvetica', 'normal');
 
-                let y = 25;
+                let y = 25;                                    // <- AQUÍ está "y"
 
-                if (d.entrada) {
-                    doc.setFontSize(12);
-                    doc.text(`Entrada: ${d.entrada.hora}`, 10, y);
-                    y += 5;
-                    if (d.entrada.foto) {
-                        try {
-                            doc.addImage(d.entrada.foto, 'JPEG', 10, y, 50, 50);
-                            y += 55;
-                        } catch {
-                            doc.text('(Error cargando imagen)', 10, y);
-                            y += 10;
-                        }
-                    }
+                if (jornadas.length === 0) {
+                    doc.text('Sin jornadas registradas', 10, y);
+                    y += 8;
                 }
 
-                if (d.salida) {
-                    doc.text(`Salida: ${d.salida.hora}`, 10, y);
-                    y += 5;
-                    if (d.salida.foto) {
-                        try {
-                            doc.addImage(d.salida.foto, 'JPEG', 10, y, 50, 50);
-                            y += 55;
-                        } catch {
-                            doc.text('(Error cargando imagen)', 10, y);
-                            y += 10;
-                        }
-                    }
-                }
+                for (let j = 0; j < jornadas.length; j++) {
+                    const jor = jornadas[j];
 
-                if (d.incidencias && d.incidencias.length > 0) {
                     doc.setFont('helvetica', 'bold');
-                    doc.text('Incidencias:', 10, y);
+                    doc.text(`Jornada ${j + 1}`, 10, y); y += 6;
                     doc.setFont('helvetica', 'normal');
-                    y += 5;
 
-                    d.incidencias.forEach((inc: { hora: string; nota: string; foto?: string }, idx: number) => {
-                        doc.text(`${idx + 1}. Hora: ${inc.hora}`, 10, y);
-                        y += 5;
-                        doc.text(`   Nota: ${inc.nota}`, 10, y);
-                        y += 5;
-                        if (inc.foto) {
+                    // Entrada
+                    if (jor.entrada) {
+                        doc.text(`Entrada: ${jor.entrada.hora}`, 10, y); y += 5;
+                        if (jor.entrada.foto) {
                             try {
-                                doc.addImage(inc.foto, 'JPEG', 10, y, 50, 50);
-                                y += 55;
-                            } catch {
-                                doc.text('   (Error cargando imagen)', 10, y);
-                                y += 10;
+                                const dataUrl = await toDataUrl(jor.entrada.foto);
+                                doc.addImage(dataUrl, 'JPEG', 10, y, 50, 50); y += 55;
+                            } catch { doc.text('(Error cargando imagen)', 10, y); y += 10; }
+                        }
+                    }
+
+                    // Salida
+                    if (jor.salida) {
+                        doc.text(`Salida: ${jor.salida.hora}`, 10, y); y += 5;
+                        if (jor.salida.foto) {
+                            try {
+                                const dataUrl = await toDataUrl(jor.salida.foto);
+                                doc.addImage(dataUrl, 'JPEG', 10, y, 50, 50); y += 55;
+                            } catch { doc.text('(Error cargando imagen)', 10, y); y += 10; }
+                        }
+                    }
+
+                    // Incidencias
+                    if (jor.incidencias?.length) {
+                        doc.setFont('helvetica', 'bold');
+                        doc.text('Incidencias:', 10, y); y += 5;
+                        doc.setFont('helvetica', 'normal');
+                        for (let k = 0; k < jor.incidencias.length; k++) {
+                            const inc = jor.incidencias[k];
+                            doc.text(`${k + 1}. Hora: ${inc.hora}`, 10, y); y += 5;
+                            doc.text(`   Nota: ${inc.nota}`, 10, y); y += 5;
+                            if (inc.foto) {
+                                try {
+                                    const dataUrl = await toDataUrl(inc.foto);
+                                    doc.addImage(dataUrl, 'JPEG', 10, y, 50, 50); y += 55;
+                                } catch { doc.text('   (Error cargando imagen)', 10, y); y += 10; }
                             }
                         }
-                    });
+                    }
+
+                    y += 5; // separación entre jornadas
                 }
             }
 
-            const nombreArchivo = mes
-                ? `registro_laboral_${mes}.pdf`
-                : 'registro_laboral_completo.pdf';
-
-            doc.save(nombreArchivo);
-        } catch (error: Error | unknown) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            alert('Error generando PDF: ' + errorMessage);
+            // 3) Guardar y abrir
+            const pdfDataUrl = doc.output('datauristring');
+            await saveDataUrlSafe(nombreArchivo, pdfDataUrl);
+            await openFile(nombreArchivo);
+        } catch (err: any) {
+            alert('Error generando PDF: ' + (err?.message ?? String(err)));
+        } finally {
+            setCargando(false);
+            setMostrarSelectorMes(false);
         }
-
-        setCargando(false);
-        setMostrarSelectorMes(false);
     };
 
     const obtenerMesesDisponibles = async () => {
         try {
-            const result = await window.storage.list();
-            const meses = new Set();
-
-            result.keys.forEach((key: string) => {
-                if (key.match(/^\d{4}-\d{2}-\d{2}$/)) {
-                    meses.add(key.slice(0, 7));
-                }
-            });
-
+            const keys = await listDias();
+            const meses = new Set<string>();
+            keys.forEach(k => { if (/^\d{4}-\d{2}-\d{2}$/.test(k)) meses.add(k.slice(0, 7)); });
             return Array.from(meses).sort().reverse();
         } catch {
             return [];
@@ -487,7 +517,7 @@ export default function RegistroLaboral() {
                                 Todos los registros
                             </button>
                             <button
-                                onClick={() => generarPDF(new Date().toISOString().slice(0, 7))}
+                                onClick={() => generarPDF(mesActualLocal)}
                                 className="bg-green-600 hover:bg-green-700 rounded-lg px-4 py-3 w-full mb-4 transition-colors"
                             >
                                 Mes actual
