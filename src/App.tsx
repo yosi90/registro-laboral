@@ -11,7 +11,6 @@ import { App as CapApp } from '@capacitor/app';
 import type { PluginListenerHandle } from '@capacitor/core';
 
 export default function RegistroLaboral() {
-
     function yyyy_mm_dd_local(d = new Date()) {
         const y = d.getFullYear();
         const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -34,10 +33,23 @@ export default function RegistroLaboral() {
     const [cargando, setCargando] = useState(false);
     const inputRef = useRef<HTMLInputElement | null>(null);
 
-    // Distingue si viene de la época "antigua" (dataURL) o de fichero nuevo (ruta)
-    const toDataUrl = async (src: string) => {
-        return src.startsWith('data:') ? src : await readAsDataUrl(src);
-    };
+    // Duraciones
+    function hms(totalSec: number) {
+        const h = Math.floor(totalSec / 3600);
+        const m = Math.floor((totalSec % 3600) / 60);
+        const s = totalSec % 60;
+        return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+    function toSec(hora: string) {
+        const [h, m, s] = hora.split(':').map(n => parseInt(n || '0', 10));
+        return (h * 3600) + (m * 60) + (s || 0);
+    }
+
+    // Soporte mixto (ruta o dataURL)
+    const toDataUrl = async (src: string) => (
+        src?.startsWith('data:') ? src : await readAsDataUrl(src)
+    );
+
 
     useEffect(() => {
         // Detecta y verifica al arrancar (lo tuyo de antes)
@@ -234,21 +246,181 @@ export default function RegistroLaboral() {
         inputRef.current?.click();
     };
 
-    // Función comentada porque no está siendo utilizada actualmente
-    // const completarIncidencia = async (foto: string, hora: string) => {
-    //   await guardarRegistro('incidencia', hora, foto, notaIncidencia);
-    //   setNotaIncidencia('');
-    //   setHoraIncidencia('');
-    //   setTipoRegistro('');
-    // };
-
     const generarPDF = async (mes?: string) => {
         setCargando(true);
         try {
-            const periodo = mes ?? 'completo';
-            const nombreArchivo = buildPdfName(periodo);
+            // ==================== HELPERS LOCALES ====================
+            const renderMonth = async (month: string, isFirstPage: boolean) => {
+                // Recoger días del mes
+                const todas = await listDias();
+                const fechas = todas.filter(k => k.startsWith(month)).sort();
+                if (!fechas.length) return { bytes: 0 };
 
-            // Si ya existe, lo abrimos y salimos
+                // -------- Agregados para estadísticas --------
+                let totalSec = 0;
+                let diasConReg = 0;
+                let jornadasCerradas = 0;
+                let jornadasAbiertas = 0;
+                let incidenciasTot = 0;
+                let primerFichaje: string | null = null;
+                let ultimoFichaje: string | null = null;
+
+                type FotoRef = { dia: string; jIdx: number; tipo: 'entrada' | 'salida'; dataUrl: string };
+                const fotosAppendix: FotoRef[] = [];
+
+                for (const f of fechas) {
+                    const d = await getDia(f);
+                    const jornadas = d?.jornadas ?? [];
+                    if (jornadas.length) diasConReg++;
+
+                    for (let j = 0; j < jornadas.length; j++) {
+                        const jo = jornadas[j];
+
+                        // horas
+                        if (jo.entrada?.hora && jo.salida?.hora) {
+                            totalSec += Math.max(0, toSec(jo.salida.hora) - toSec(jo.entrada.hora));
+                            jornadasCerradas++;
+                        } else {
+                            jornadasAbiertas++;
+                        }
+
+                        // incidencias
+                        incidenciasTot += jo.incidencias?.length || 0;
+
+                        // primer/último fichaje del mes
+                        if (jo.entrada?.hora) {
+                            const eStamp = `${f} ${jo.entrada.hora}`;
+                            if (!primerFichaje || eStamp < primerFichaje) primerFichaje = eStamp;
+                            if (!ultimoFichaje || eStamp > ultimoFichaje) ultimoFichaje = eStamp;
+                        }
+                        if (jo.salida?.hora) {
+                            const sStamp = `${f} ${jo.salida.hora}`;
+                            if (!primerFichaje || sStamp < primerFichaje) primerFichaje = sStamp;
+                            if (!ultimoFichaje || sStamp > ultimoFichaje) ultimoFichaje = sStamp;
+                        }
+
+                        // fotos para apéndice
+                        if (jo.entrada?.foto) {
+                            try { fotosAppendix.push({ dia: f, jIdx: j, tipo: 'entrada', dataUrl: await toDataUrl(jo.entrada.foto) }); } catch { }
+                        }
+                        if (jo.salida?.foto) {
+                            try { fotosAppendix.push({ dia: f, jIdx: j, tipo: 'salida', dataUrl: await toDataUrl(jo.salida.foto) }); } catch { }
+                        }
+                    }
+                }
+
+                // ======= PÁGINA DE ESTADÍSTICAS (SIEMPRE SOLA) =======
+                if (!isFirstPage) doc.addPage();
+                doc.setFontSize(16); doc.setFont('helvetica', 'bold');
+                doc.text(`Informe mensual — ${month}`, 105, 15, { align: 'center' });
+                doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
+
+                // Grid con gutter entre cajas
+                const G = 4; // gutter
+                const box = (x: number, y: number, w: number, h: number, title: string, value: string) => {
+                    doc.roundedRect(x, y, w, h, 2, 2);
+                    doc.setFont('helvetica', 'bold'); doc.text(title, x + 4, y + 6);
+                    doc.setFont('helvetica', 'normal'); doc.text(value, x + 4, y + 12);
+                };
+                const H = hms(totalSec);
+
+                // Fila 1
+                const w1 = 88;
+                box(10, 25, w1, 18, 'Mes', month);
+                box(10 + w1 + G, 25, w1, 18, 'Horas registradas', H);
+
+                // Fila 2 (ya tenías gutter, lo mantenemos)
+                box(10, 47, 60, 18, 'Días registrados', String(diasConReg));
+                box(74, 47, 60, 18, 'Jornadas', `${jornadasCerradas + jornadasAbiertas} (${jornadasCerradas} cerradas, ${jornadasAbiertas} abiertas)`);
+                box(138, 47, 62, 18, 'Incidencias', String(incidenciasTot));
+
+                // Fila 3 con gutter entre cajas (separación pedida)
+                const w3 = 88;
+                box(10, 69, w3, 18, 'Primer fichaje', primerFichaje ? primerFichaje.split(' ').pop()! : '—');
+                box(10 + w3 + G, 69, w3, 18, 'Último fichaje', ultimoFichaje ? ultimoFichaje.split(' ').pop()! : '—');
+
+                // ⛔ Siempre salto de página tras estadísticas
+                doc.addPage();
+
+                // ======= DÍAS DEL MES =======
+                let y = 20;
+                const bottom = 280;
+                const ensureSpace = (need: number) => { if (y + need > bottom) { doc.addPage(); y = 20; } };
+
+                const PAGE_W = doc.internal.pageSize.getWidth();
+                const MARGIN = 10;
+                const LINE_H = 6;
+                const TH = 14; // thumbnail
+                const rightX = PAGE_W - MARGIN - TH;
+
+                const drawLineWithThumb = async (label: string, value: string, foto?: string) => {
+                    doc.text(`${label}: ${value}`, MARGIN + 2, y);
+                    let blockH = LINE_H;
+                    if (foto) {
+                        try {
+                            const thumb = await toDataUrl(foto);
+                            doc.addImage(thumb, 'JPEG', rightX, y - (TH - LINE_H), TH, TH);
+                            blockH = Math.max(LINE_H, TH + 2);
+                        } catch { }
+                    }
+                    y += blockH;
+                };
+
+                for (const f of fechas) {
+                    const d = await getDia(f);
+                    const jornadas = d?.jornadas ?? [];
+                    if (!jornadas.length) continue;
+
+                    ensureSpace(14);
+                    doc.setFont('helvetica', 'bold'); doc.setFontSize(13);
+                    doc.text(`Fecha: ${f}`, MARGIN, y); y += 6;
+                    doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
+
+                    for (let j = 0; j < jornadas.length; j++) {
+                        const jo = jornadas[j];
+                        ensureSpace(12);
+                        doc.setFont('helvetica', 'bold'); doc.text(`Jornada ${j + 1}`, MARGIN, y); y += 5;
+                        doc.setFont('helvetica', 'normal');
+
+                        if (jo.entrada) await drawLineWithThumb('Entrada', jo.entrada.hora, jo.entrada.foto);
+                        if (jo.salida) await drawLineWithThumb('Salida', jo.salida.hora, jo.salida.foto);
+
+                        if (jo.incidencias?.length) {
+                            ensureSpace(6 + jo.incidencias.length * 6);
+                            doc.setFont('helvetica', 'bold'); doc.text('Incidencias:', MARGIN + 2, y); y += 6;
+                            doc.setFont('helvetica', 'normal');
+                            for (let k = 0; k < jo.incidencias.length; k++) {
+                                const inc = jo.incidencias[k];
+                                doc.text(`${k + 1}. ${inc.hora}${inc.nota ? ' — ' + inc.nota : ''}`, MARGIN + 6, y);
+                                y += 6;
+                            }
+                        }
+
+                        y += 3;
+                    }
+                    y += 3;
+                }
+
+                // ======= APÉNDICE DE FOTOS =======
+                if (fotosAppendix.length) {
+                    doc.addPage();
+                    doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
+                    doc.text('Apéndice de fotos', 105, 15, { align: 'center' });
+                    doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
+                    let ax = 10, ay = 25; const AW = 60, AH = 60; const GAP = 6;
+                    const place = async (t: FotoRef) => {
+                        if (ax + AW > 200) { ax = 10; ay += AH + 18; }
+                        if (ay + AH > 280) { doc.addPage(); ax = 10; ay = 20; }
+                        doc.text(`${t.dia} · J${t.jIdx + 1} · ${t.tipo}`, ax, ay - 3);
+                        try { doc.addImage(t.dataUrl, 'JPEG', ax, ay, AW, AH); } catch { }
+                        ax += AW + GAP;
+                    };
+                    for (const f of fotosAppendix) { await place(f); }
+                }
+            };
+
+            // ==================== RENDERIZADO ====================
+            const nombreArchivo = buildPdfName(mes ?? 'completo');
             if (await fileExists(nombreArchivo)) {
                 await openFile(nombreArchivo);
                 return;
@@ -256,98 +428,35 @@ export default function RegistroLaboral() {
 
             const doc = new jsPDF();
 
-            // 1) Fechas a incluir
-            const todas = await listDias();
-            const fechas = todas
-                .filter(k => (mes ? k.startsWith(mes) : true))
-                .sort();
-
-            if (fechas.length === 0) {
-                alert('No hay registros para el período seleccionado.');
-                return;
-            }
-
-            // 2) Para cada fecha, dibujamos su página
-            for (let i = 0; i < fechas.length; i++) {
-                const fecha = fechas[i];
-                const d = await getDia(fecha);                 // <- AQUÍ está "d"
-                const jornadas = (d?.jornadas ?? []) as Jornada[];
-
-                if (i > 0) doc.addPage();
-                doc.setFontSize(14);
-                doc.setFont('helvetica', 'bold');
-                doc.text(`Fecha: ${fecha}`, 10, 10);
-                doc.setFont('helvetica', 'normal');
-
-                let y = 25;                                    // <- AQUÍ está "y"
-
-                if (jornadas.length === 0) {
-                    doc.text('Sin jornadas registradas', 10, y);
-                    y += 8;
-                }
-
-                for (let j = 0; j < jornadas.length; j++) {
-                    const jor = jornadas[j];
-
-                    doc.setFont('helvetica', 'bold');
-                    doc.text(`Jornada ${j + 1}`, 10, y); y += 6;
-                    doc.setFont('helvetica', 'normal');
-
-                    // Entrada
-                    if (jor.entrada) {
-                        doc.text(`Entrada: ${jor.entrada.hora}`, 10, y); y += 5;
-                        if (jor.entrada.foto) {
-                            try {
-                                const dataUrl = await toDataUrl(jor.entrada.foto);
-                                doc.addImage(dataUrl, 'JPEG', 10, y, 50, 50); y += 55;
-                            } catch { doc.text('(Error cargando imagen)', 10, y); y += 10; }
-                        }
-                    }
-
-                    // Salida
-                    if (jor.salida) {
-                        doc.text(`Salida: ${jor.salida.hora}`, 10, y); y += 5;
-                        if (jor.salida.foto) {
-                            try {
-                                const dataUrl = await toDataUrl(jor.salida.foto);
-                                doc.addImage(dataUrl, 'JPEG', 10, y, 50, 50); y += 55;
-                            } catch { doc.text('(Error cargando imagen)', 10, y); y += 10; }
-                        }
-                    }
-
-                    // Incidencias
-                    if (jor.incidencias?.length) {
-                        doc.setFont('helvetica', 'bold');
-                        doc.text('Incidencias:', 10, y); y += 5;
-                        doc.setFont('helvetica', 'normal');
-                        for (let k = 0; k < jor.incidencias.length; k++) {
-                            const inc = jor.incidencias[k];
-                            doc.text(`${k + 1}. Hora: ${inc.hora}`, 10, y); y += 5;
-                            doc.text(`   Nota: ${inc.nota}`, 10, y); y += 5;
-                            if (inc.foto) {
-                                try {
-                                    const dataUrl = await toDataUrl(inc.foto);
-                                    doc.addImage(dataUrl, 'JPEG', 10, y, 50, 50); y += 55;
-                                } catch { doc.text('   (Error cargando imagen)', 10, y); y += 10; }
-                            }
-                        }
-                    }
-
-                    y += 5; // separación entre jornadas
+            if (mes) {
+                // ---- SOLO ESE MES ----
+                await renderMonth(mes, true);
+            } else {
+                // ---- HISTÓRICO: todos los meses, uno por página nueva ----
+                const keys = await listDias();
+                const months = Array.from(new Set(keys.map(k => k.slice(0, 7)))).sort();
+                let first = true;
+                for (const m of months) {
+                    await renderMonth(m, first);
+                    first = false;
+                    // Al terminar un mes, SI NO es el último, aseguramos página nueva
+                    if (m !== months[months.length - 1]) doc.addPage();
                 }
             }
 
-            // 3) Guardar y abrir
+            // Guardar + abrir
             const pdfDataUrl = doc.output('datauristring');
             await saveDataUrlSafe(nombreArchivo, pdfDataUrl);
             await openFile(nombreArchivo);
-        } catch (err: any) {
-            alert('Error generando PDF: ' + (err?.message ?? String(err)));
+
+        } catch (e: any) {
+            alert('Error generando PDF: ' + (e?.message ?? String(e)));
         } finally {
             setCargando(false);
             setMostrarSelectorMes(false);
         }
     };
+
 
     const obtenerMesesDisponibles = async () => {
         try {
