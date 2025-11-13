@@ -78,3 +78,11 @@ export async function saveDataUrlSafe(fileName: string, dataUrl: string) {
     });
     return fullPath;
 }
+
+export async function deletePublicFile(path: string) {
+    try {
+        await Filesystem.deleteFile({ directory: BASE_DIR, path });
+    } catch {
+        // Si no existe, ignoramos
+    }
+}

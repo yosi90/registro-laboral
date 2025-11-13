@@ -1,3 +1,6 @@
+// TODO Crear botón para eliminar un registro.
+// TODO Terminar la funcionalidad de las incidencias.
+
 /* @ts-nocheck */
 import { useState, useRef, useEffect } from 'react';
 import exifr from 'exifr';
@@ -5,7 +8,7 @@ import { jsPDF } from 'jspdf';
 import { Camera, Clock, AlertCircle, FileText, Calendar, LogIn, LogOut } from 'lucide-react';
 import { getDia, setDia, addDiaAlIndice, listDias } from './native/storage';
 import type { RegistroData, Jornada } from './native/storage';
-import { buildPdfName, fileExists, openFile, saveDataUrlSafe, readAsDataUrl, buildImageName, saveDataUrl } from './native/files';
+import { buildPdfName, fileExists, openFile, saveDataUrlSafe, readAsDataUrl, buildImageName, saveDataUrl, deletePublicFile } from './native/files';
 import { compressImageDataUrl } from './native/imageTools';
 import { App as CapApp } from '@capacitor/app';
 import type { PluginListenerHandle } from '@capacitor/core';
@@ -31,6 +34,7 @@ export default function RegistroLaboral() {
     // Estado actualmente no usado; el mes se pasa directamente a generarPDF
     const [dispositivoValido, setDispositivoValido] = useState(true);
     const [cargando, setCargando] = useState(false);
+    const [fotoIncidencia, setFotoIncidencia] = useState<string>('');
     const inputRef = useRef<HTMLInputElement | null>(null);
 
     // Duraciones
@@ -197,6 +201,60 @@ export default function RegistroLaboral() {
         setTimeout(verificarEstadoHoy, 150);
     };
 
+    const eliminarEntrada = async (jIdx: number) => {
+        const hoy = yyyy_mm_dd_local();
+        const data: RegistroData = (await getDia(hoy)) ?? { jornadas: [] };
+        const jor = data.jornadas[jIdx];
+        if (!jor) return;
+
+        // Borramos fotos asociadas (entrada y, si quieres, también salida e incidencias si vas a eliminar toda la jornada)
+        if (jor.entrada?.foto) await deletePublicFile(jor.entrada.foto);
+
+        // Si la jornada tiene salida o incidencias, decisión de UX:
+        // Para mantener coherencia, eliminamos la jornada completa
+        if (jor.salida?.foto) await deletePublicFile(jor.salida.foto);
+        if (jor.incidencias?.length) {
+            for (const inc of jor.incidencias) if (inc.foto) await deletePublicFile(inc.foto);
+        }
+        data.jornadas.splice(jIdx, 1);
+
+        await setDia(hoy, data);
+        await verificarEstadoHoy(); // esto recalcula dentroTrabajo
+    };
+
+    const eliminarSalida = async (jIdx: number) => {
+        const hoy = yyyy_mm_dd_local();
+        const data: RegistroData = (await getDia(hoy)) ?? { jornadas: [] };
+        const jor = data.jornadas[jIdx];
+        if (!jor || !jor.salida) return;
+
+        if (jor.salida.foto) await deletePublicFile(jor.salida.foto);
+        delete jor.salida;
+
+        await setDia(hoy, data);
+        await verificarEstadoHoy(); // con salida borrada, quedas "dentro"
+    };
+
+    const eliminarIncidencia = async (jIdx: number, k: number) => {
+        const hoy = yyyy_mm_dd_local();
+        const data: RegistroData = (await getDia(hoy)) ?? { jornadas: [] };
+        const jor = data.jornadas[jIdx];
+        if (!jor?.incidencias) return;
+
+        const inc = jor.incidencias[k];
+        if (inc?.foto) await deletePublicFile(inc.foto);
+
+        jor.incidencias.splice(k, 1);
+
+        // Si la jornada queda vacía (sin entrada, salida ni incidencias), elimínala
+        if (!jor.entrada && !jor.salida && (!jor.incidencias || jor.incidencias.length === 0)) {
+            data.jornadas.splice(jIdx, 1);
+        }
+
+        await setDia(hoy, data);
+        await verificarEstadoHoy();
+    };
+
     const onFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
@@ -218,10 +276,7 @@ export default function RegistroLaboral() {
 
             if (tipoRegistro === 'incidencia') {
                 setHoraIncidencia(hora);
-                await guardarRegistro('incidencia', hora, ruta, notaIncidencia);
-                setNotaIncidencia('');
-                setHoraIncidencia('');
-                setTipoRegistro('');
+                setFotoIncidencia(ruta);     // guardamos la ruta para el "Guardar"
                 setCargando(false);
                 return;
             }
@@ -242,9 +297,20 @@ export default function RegistroLaboral() {
             alert('Por favor, describe la incidencia.');
             return;
         }
-
-        inputRef.current?.click();
+        // Si aún no hay foto, abre la cámara
+        if (!fotoIncidencia) {
+            inputRef.current?.click();
+            return;
+        }
+        // Ya hay foto -> guardar incidencia
+        await guardarRegistro('incidencia', horaIncidencia || new Date().toTimeString().slice(0, 8), fotoIncidencia, notaIncidencia);
+        // limpiar estado
+        setNotaIncidencia('');
+        setHoraIncidencia('');
+        setFotoIncidencia('');
+        setTipoRegistro('');
     };
+
 
     const generarPDF = async (mes?: string) => {
         setCargando(true);
@@ -575,13 +641,14 @@ export default function RegistroLaboral() {
                                 disabled={cargando || !notaIncidencia.trim()}
                                 className="bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 rounded-lg px-6 py-3 flex-1 font-semibold transition-colors"
                             >
-                                {horaIncidencia ? 'Guardar' : 'Tomar Foto'}
+                                {fotoIncidencia ? 'Guardar' : 'Tomar Foto'}
                             </button>
                             <button
                                 onClick={() => {
                                     setTipoRegistro('');
                                     setNotaIncidencia('');
                                     setHoraIncidencia('');
+                                    setFotoIncidencia('');
                                 }}
                                 className="bg-gray-600 hover:bg-gray-700 rounded-lg px-6 py-3 font-semibold transition-colors"
                             >
@@ -607,6 +674,14 @@ export default function RegistroLaboral() {
                                     <LogIn className="w-4 h-4 text-green-400" />
                                     <span className="text-gray-300">Entrada</span>
                                     <span className="ml-auto font-mono">{j.entrada?.hora ?? '--:--:--'}</span>
+                                    <button
+                                        onClick={() => eliminarEntrada(idx)}
+                                        className="ml-2 text-red-400 hover:text-red-300 font-bold px-2"
+                                        aria-label="Eliminar entrada"
+                                        title="Eliminar entrada (borra la jornada si tiene salida/incidencias)"
+                                    >
+                                        ×
+                                    </button>
                                 </div>
 
                                 {/* Salida (si existe) */}
@@ -615,13 +690,32 @@ export default function RegistroLaboral() {
                                         <LogOut className="w-4 h-4 text-red-400" />
                                         <span className="text-gray-300">Salida</span>
                                         <span className="ml-auto font-mono">{j.salida.hora}</span>
+                                        <button
+                                            onClick={() => eliminarSalida(idx)}
+                                            className="ml-2 text-red-400 hover:text-red-300 font-bold px-2"
+                                            aria-label="Eliminar salida"
+                                            title="Eliminar salida"
+                                        >
+                                            ×
+                                        </button>
                                     </div>
                                 )}
+
                                 {/* Incidencias (si hay) */}
                                 {j.incidencias?.length ? (
-                                    <div className="mt-1 ml-6 text-xs text-gray-400">
+                                    <div className="mt-1 ml-6 text-xs text-gray-400 space-y-1">
                                         {j.incidencias.map((inc, k) => (
-                                            <div key={k}>• Incidencia {k + 1}: {inc.hora}</div>
+                                            <div key={k} className="flex items-center">
+                                                <span>• Incidencia {k + 1}: {inc.hora}</span>
+                                                <button
+                                                    onClick={() => eliminarIncidencia(idx, k)}
+                                                    className="ml-2 text-red-400 hover:text-red-300 font-bold px-2"
+                                                    aria-label="Eliminar incidencia"
+                                                    title="Eliminar incidencia"
+                                                >
+                                                    ×
+                                                </button>
+                                            </div>
                                         ))}
                                     </div>
                                 ) : null}
