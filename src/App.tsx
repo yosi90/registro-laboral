@@ -5,7 +5,7 @@
 import { useState, useRef, useEffect } from 'react';
 import exifr from 'exifr';
 import { jsPDF } from 'jspdf';
-import { Camera, Clock, AlertCircle, FileText, Calendar, LogIn, LogOut } from 'lucide-react';
+import { Camera, Clock, AlertCircle, FileText, Calendar, LogIn, LogOut, X, AlertTriangle } from 'lucide-react';
 import { getDia, setDia, addDiaAlIndice, listDias } from './native/storage';
 import type { RegistroData, Jornada } from './native/storage';
 import { buildPdfName, fileExists, openFile, saveDataUrlSafe, readAsDataUrl, buildImageName, saveDataUrl, deletePublicFile } from './native/files';
@@ -235,6 +235,43 @@ export default function RegistroLaboral() {
         await verificarEstadoHoy(); // con salida borrada, quedas "dentro"
     };
 
+    // Abre la cámara / selector de archivos para añadir foto a la incidencia
+    const anadirFotoIncidencia = () => {
+        // nos aseguramos de que el flujo esté en "incidencia"
+        setTipoRegistro('incidencia');
+        inputRef.current?.click();
+    };
+
+    // Guarda la incidencia (foto opcional)
+    const registrarIncidencia = async () => {
+        if (!notaIncidencia.trim()) return; // deshabilitamos el botón si no hay texto
+
+        const hora = (horaIncidencia && horaIncidencia.length >= 5)
+            ? horaIncidencia
+            : new Date().toTimeString().slice(0, 8); // HH:MM:SS
+
+        await guardarRegistro(
+            'incidencia',
+            hora,
+            fotoIncidencia || '',             // <- foto opcional
+            notaIncidencia.trim()
+        );
+
+        // Limpiar y cerrar el formulario
+        setNotaIncidencia('');
+        setHoraIncidencia('');
+        setFotoIncidencia('');
+        setTipoRegistro('');
+    };
+
+    // Cancelar (✕)
+    const cancelarIncidencia = () => {
+        setTipoRegistro('');
+        setNotaIncidencia('');
+        setHoraIncidencia('');
+        setFotoIncidencia('');
+    };
+
     const eliminarIncidencia = async (jIdx: number, k: number) => {
         const hoy = yyyy_mm_dd_local();
         const data: RegistroData = (await getDia(hoy)) ?? { jornadas: [] };
@@ -291,26 +328,6 @@ export default function RegistroLaboral() {
         setCargando(false);
         e.target.value = '';
     };
-
-    const guardarIncidencia = async () => {
-        if (!notaIncidencia.trim()) {
-            alert('Por favor, describe la incidencia.');
-            return;
-        }
-        // Si aún no hay foto, abre la cámara
-        if (!fotoIncidencia) {
-            inputRef.current?.click();
-            return;
-        }
-        // Ya hay foto -> guardar incidencia
-        await guardarRegistro('incidencia', horaIncidencia || new Date().toTimeString().slice(0, 8), fotoIncidencia, notaIncidencia);
-        // limpiar estado
-        setNotaIncidencia('');
-        setHoraIncidencia('');
-        setFotoIncidencia('');
-        setTipoRegistro('');
-    };
-
 
     const generarPDF = async (mes?: string) => {
         setCargando(true);
@@ -635,26 +652,41 @@ export default function RegistroLaboral() {
                             placeholder="Describe la incidencia..."
                             className="w-full mb-4 p-3 rounded-lg text-black bg-white border-2 border-gray-300 focus:border-yellow-500 focus:outline-none min-h-32"
                         />
-                        <div className="flex gap-3">
+                        {fotoIncidencia ? (
+                            <div className="text-xs text-green-400 mt-1">Foto añadida</div>
+                        ) : null}
+                        {/* Botonera incidencia */}
+                        <div className="flex flex-wrap items-center gap-3 mt-3">
+                            {/* Registrar incidencia: deshabilitado si no hay texto */}
                             <button
-                                onClick={guardarIncidencia}
-                                disabled={cargando || !notaIncidencia.trim()}
-                                className="bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 rounded-lg px-6 py-3 flex-1 font-semibold transition-colors"
+                                onClick={registrarIncidencia}
+                                disabled={!notaIncidencia.trim() || cargando}
+                                className="bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg px-3 py-2 text-sm font-semibold transition-colors"
                             >
-                                {fotoIncidencia ? 'Guardar' : 'Tomar Foto'}
+                                Registrar incidencia
                             </button>
+
+                            {/* Añadir foto: siempre activo, la foto es opcional */}
                             <button
-                                onClick={() => {
-                                    setTipoRegistro('');
-                                    setNotaIncidencia('');
-                                    setHoraIncidencia('');
-                                    setFotoIncidencia('');
-                                }}
-                                className="bg-gray-600 hover:bg-gray-700 rounded-lg px-6 py-3 font-semibold transition-colors"
+                                onClick={anadirFotoIncidencia}
+                                disabled={cargando}
+                                className="bg-blue-600 hover:bg-blue-700 rounded-lg px-3 py-2 text-sm font-semibold flex items-center gap-1 transition-colors"
                             >
-                                Cancelar
+                                <Camera className="w-4 h-4" />
+                                Añadir foto
+                            </button>
+
+                            {/* Cancelar: equis roja sin texto */}
+                            <button
+                                onClick={cancelarIncidencia}
+                                className="ml-auto text-red-500 hover:text-red-400 p-1"
+                                aria-label="Cancelar incidencia"
+                                title="Cancelar"
+                            >
+                                <X className="w-4 h-4" />
                             </button>
                         </div>
+
                     </div>
                 )}
 
@@ -666,9 +698,9 @@ export default function RegistroLaboral() {
                         <p className="text-gray-400 text-sm">Aún no hay registros hoy.</p>
                     )}
 
-                    <ul className="space-y-2">
+                    <ul className="space-y-3">
                         {jornadasHoy.map((j, idx) => (
-                            <li key={idx} className="text-sm">
+                            <li key={idx} className="text-sm space-y-1">
                                 {/* Entrada */}
                                 <div className="flex items-center gap-2">
                                     <LogIn className="w-4 h-4 text-green-400" />
@@ -676,46 +708,49 @@ export default function RegistroLaboral() {
                                     <span className="ml-auto font-mono">{j.entrada?.hora ?? '--:--:--'}</span>
                                     <button
                                         onClick={() => eliminarEntrada(idx)}
-                                        className="ml-2 text-red-400 hover:text-red-300 font-bold px-2"
-                                        aria-label="Eliminar entrada"
-                                        title="Eliminar entrada (borra la jornada si tiene salida/incidencias)"
+                                        className="ml-2 w-6 h-6 flex items-center justify-center rounded-lg bg-black/40 text-red-400 hover:text-red-300"
+                                        aria-label="Eliminar jornada"
+                                        title="Eliminar jornada"
                                     >
-                                        ×
+                                        x
                                     </button>
                                 </div>
 
                                 {/* Salida (si existe) */}
                                 {j.salida && (
-                                    <div className="flex items-center gap-2 mt-1">
+                                    <div className="flex items-center gap-2">
                                         <LogOut className="w-4 h-4 text-red-400" />
                                         <span className="text-gray-300">Salida</span>
                                         <span className="ml-auto font-mono">{j.salida.hora}</span>
                                         <button
                                             onClick={() => eliminarSalida(idx)}
-                                            className="ml-2 text-red-400 hover:text-red-300 font-bold px-2"
+                                            className="ml-2 w-6 h-6 flex items-center justify-center rounded-lg bg-black/40 text-red-400 hover:text-red-300"
                                             aria-label="Eliminar salida"
                                             title="Eliminar salida"
                                         >
-                                            ×
+                                            x
                                         </button>
                                     </div>
                                 )}
 
                                 {/* Incidencias (si hay) */}
                                 {j.incidencias?.length ? (
-                                    <div className="mt-1 ml-6 text-xs text-gray-400 space-y-1">
+                                    <div className="space-y-1">
                                         {j.incidencias.map((inc, k) => (
-                                            <div key={k} className="flex items-center">
-                                                <span>• Incidencia {k + 1}: {inc.hora}</span>
+                                            <div key={k} className="flex items-center gap-2">
+                                                <AlertTriangle className="w-4 h-4 text-yellow-400" />
+                                                <span className="text-gray-300">Incidencia {k + 1}</span>
+                                                <span className="ml-auto font-mono">{inc.hora}</span>
                                                 <button
                                                     onClick={() => eliminarIncidencia(idx, k)}
-                                                    className="ml-2 text-red-400 hover:text-red-300 font-bold px-2"
+                                                    className="ml-2 w-6 h-6 flex items-center justify-center rounded-lg bg-black/40 text-red-400 hover:text-red-300"
                                                     aria-label="Eliminar incidencia"
                                                     title="Eliminar incidencia"
                                                 >
-                                                    ×
+                                                    x
                                                 </button>
                                             </div>
+
                                         ))}
                                     </div>
                                 ) : null}
@@ -739,8 +774,7 @@ export default function RegistroLaboral() {
                     <button
                         onClick={abrirSelectorMes}
                         disabled={cargando}
-                        className="bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 rounded-xl px-6 py-4 w-full shadow-lg transition-all flex items-center justify-center gap-3"
-                    >
+                        className="bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 disabled:from-gray-600 disabled:to-gray-700 rounded-xl px-6 py-4 w-full shadow-lg transition-all flex items-center justify-center gap-3">
                         <FileText className="w-6 h-6" />
                         <span className="text-lg font-semibold">Generar Informe PDF</span>
                     </button>
